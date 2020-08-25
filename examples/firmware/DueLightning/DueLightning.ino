@@ -9,8 +9,10 @@
  * We recommend using the Due native USB port for communication with the Due and plugging 
  * in the programming serial port inorder to upload the firmware.
 */
-#define Serial SerialUSB
 
+#define ENABLE_SERIAL_DEBUGGING
+#define SerialData SerialUSB
+#define SerialDebug Serial
 /**
  * \brief Set RC on the selected channel.
  *
@@ -100,17 +102,17 @@ volatile bool gFirstSampleTimeRequested = false;
 
 void debugNewLine()
 {
-//Serial.write('\n'); //Readability while testing only!
+SerialDebug.write('\n'); //Readability while testing only!
 }
 
 
 void setup()
 {
-Serial.begin (115200); //baudrate ignored by SerialUSB!
-while(!Serial);
+SerialData.begin (115200); //baudrate ignored by SerialUSB!
+while(!SerialData);
 
 #ifdef ENABLE_SERIAL_DEBUGGING 
-Serial.begin(0);  //debugging
+SerialDebug.begin(115200);  //debugging
 #endif
 
 pinMode(LED_BUILTIN, OUTPUT);
@@ -158,8 +160,9 @@ void dac_setup ()
 
   DACC->DACC_IDR = 0xFFFFFFFF ; // no interrupts
   DACC->DACC_CHER = DACC_CHER_CH0 << 0 ; // enable chan0
-
+#ifdef ENABLE_SERIAL_DEBUGGING
   digitalWrite(LED_BUILTIN, LOW);
+  #endif
 }
 
 void dac_write (int val)
@@ -229,7 +232,7 @@ Transfer Period = (TRANSFER * 2 + 3) ADCClock periods.
   ADC->ADC_IER = 0x80 ;         // enable AD7 End-Of-Conv interrupt (Arduino pin A0)
   ADC->ADC_CHDR = 0xFFFF ;      // disable all channels
   //ADC->ADC_CHER = 0x80 ;        // enable just A0
-  ADC->ADC_CHER = 0xc0 ;        // enable A1 and A0 (2 ADC channels, interrupt on the last one, AD7 only)
+  ADC->ADC_CHER = 0xff ;        // enable all
   ADC->ADC_CGR = 0x15555555 ;   // All gains set to x1
   ADC->ADC_COR = 0x00000000 ;   // All offsets off
  
@@ -361,7 +364,7 @@ class RingBufferSized
 
 const int kMaxCommandLenBytes = 64;
 
-const int kADCChannels = 2; //must be power of 2 (for now)
+const int kADCChannels = 8; //must be power of 2 (for now)
 const int kBytesPerSample = sizeof(int16_t);
 
 //We use two sizes of data packet, one for low sampling rates, with just one point per packet
@@ -371,7 +374,7 @@ const int kPointsPerMediumSizePacket = 10;
 
 int gADCPointsPerPacket = kPointsPerPacket;
 
-const int kLog2BufferPoints = 13; //8192 points
+const int kLog2BufferPoints = 11; //8192 points
 
 typedef RingBufferSized<int16_t, kLog2BufferPoints> TRingBuf;
 
@@ -406,12 +409,14 @@ if (ADC->ADC_ISR & ADC_ISR_EOC7)   // ensure there was an End-of-Conversion and 
      {
     //val = 2048; //send a hard 0 in 2nd channel (for testing only) !!
      if(!gSampleBuffers[0].Push(val0))       // stick in circular buffer for A0
+     #ifdef ENABLE_SERIAL_DEBUGGING
          digitalWrite(LED_BUILTIN, LOW);     //Turn off LED to indicate overflow
+         #endif
      gSampleBuffers[1].Push(val1);           // stick in circular buffer for A1
 
      dac_write (0xFFF & ~val0) ;             // copy inverted to DAC output FIFO
-     //Serial.print("\t");
-     //Serial.println(val,HEX);
+     SerialDebug.print("\t");
+     SerialDebug.println(val,HEX);
      }
   }
 
@@ -536,8 +541,9 @@ protected:
 
 void StartSampling()
 {
+#ifdef ENABLE_SERIAL_DEBUGGING
 digitalWrite(5, LOW);
-
+#endif
 //Restart the ADC timer here
 startADCTimer(TC0, 0, TC0_IRQn, gADCPointsPerSec);
 
@@ -546,11 +552,14 @@ for(int chan(0); chan<kADCChannels;++chan)
    auto &buffer = gSampleBuffers[chan];
    buffer.Clear();
    }
-
+#ifdef ENABLE_SERIAL_DEBUGGING
 digitalWrite(12, LOW); //Clear Buffer overflow
+#endif
 //Packet::ResetPacketCount();
 gState = kStartingSampling;
+#ifdef ENABLE_SERIAL_DEBUGGING
 digitalWrite(LED_BUILTIN, HIGH);
+#endif
 }
 
 void StopSampling()
@@ -563,8 +572,9 @@ for(int chan(0); chan<kADCChannels;++chan)
    auto buffer = gSampleBuffers[chan];
    buffer.Clear();
    }
-
+#ifdef ENABLE_SERIAL_DEBUGGING
 digitalWrite(LED_BUILTIN, LOW);
+#endif
 }
 
 
@@ -577,7 +587,7 @@ gFirstSampleTimeRequested = false;
 debugNewLine();   //Readability while testing only!
 
 FirstSampleTimePacket ftPacket(gFirstADCPointus);
-ftPacket.write(Serial);
+ftPacket.write(SerialData);
 
 debugNewLine();   //Readability while testing only!
 }
@@ -586,17 +596,17 @@ debugNewLine();   //Readability while testing only!
 
 void loop()
 {
-int hasRx = Serial.peek();
+int hasRx = SerialData.peek();
 
 if(hasRx >= 0)
    {
    char cmdBuf[kMaxCommandLenBytes];
-   int bytesRead = Serial.readBytesUntil('\n', cmdBuf, kMaxCommandLenBytes);
+   int bytesRead = SerialData.readBytesUntil('\n', cmdBuf, kMaxCommandLenBytes);
    #ifdef ENABLE_SERIAL_DEBUGGING
-   Serial.println("bytesRead="+String(bytesRead));
-   Serial.println(cmdBuf[0], HEX);
-   Serial.println(cmdBuf[1], HEX);
-   Serial.println();
+   SerialDebug.println("bytesRead="+String(bytesRead));
+   SerialDebug.println(cmdBuf[0], HEX);
+   SerialDebug.println(cmdBuf[1], HEX);
+   SerialDebug.println();
    #endif
    auto cmd = cmdBuf[0];
    switch (cmd)
@@ -615,22 +625,24 @@ if(hasRx >= 0)
       case 'n':   //return micro second time now
          {
          int32_t now = micros();
+         #ifdef ENABLE_SERIAL_DEBUGGING
          digitalWrite(5, HIGH);
-
+         #endif
          auto timeRequestNumber = cmdBuf[1];
          TimePacket timePacket(now, timeRequestNumber);
-         timePacket.write(Serial);
-
+         timePacket.write(SerialData);
+#ifdef ENABLE_SERIAL_DEBUGGING
          digitalWrite(5, LOW);
+         #endif
 
          break;   
          }
       case 'v':   //version info
-         Serial.write("ArduinoRT Example V0.9.0 $$$");
+         SerialData.write("ArduinoRT Example V0.9.0 $$$");
          Packet::ResetPacketCount(); //new session
 
          #ifdef ENABLE_SERIAL_DEBUGGING
-         Serial.println("Sent version info");
+         SerialDebug.println("Sent version info");
          #endif
          break;
       case '~': //sample rate
@@ -685,13 +697,13 @@ while(points >= gADCPointsPerPacket)
       packet.nextPoint();   
       }
    
-   digitalWrite(7, HIGH); //Debugging!
-   packet.write(Serial);
-   digitalWrite(7, LOW);  //Debugging!
+   //digitalWrite(7, HIGH); //Debugging!
+   packet.write(SerialData);
+   //digitalWrite(7, LOW);  //Debugging!
 
    --points;
 
-   //debugNewLine();   //Readability while testing only!
+   debugNewLine();   //Readability while testing only!
    }
 
 }
